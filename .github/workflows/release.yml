@@ -17,25 +17,16 @@ jobs:
   release:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'main'
-    name: Prepare or publish release
+      github.event.workflow_run.head_branch == 'main' &&
+      !startsWith(github.event.workflow_run.head_commit.message, 'chore(release):')
+    name: Create semantic release
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        id: app-token
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ secrets.RELEASE_PAT }}
 
       - name: Confirm CI checked the current main commit
         id: current-main
@@ -63,89 +54,8 @@ jobs:
         if: steps.current-main.outputs.current == 'true'
         run: uv sync --locked --all-groups
 
-      - name: Determine release action
-        id: plan
+      - name: Release with Python Semantic Release
         if: steps.current-main.outputs.current == 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          current_tag="v$(uv run python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          next_tag="$(uv run --with python-semantic-release==10.7.0 --no-project semantic-release --noop version --print-tag)"
-          if [[ -z "$next_tag" ]] || git show-ref --verify --quiet "refs/tags/$next_tag"; then
-            echo "action=none" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "tag=$next_tag" >> "$GITHUB_OUTPUT"
-          if [[ "$next_tag" == "$current_tag" ]]; then
-            echo "action=tag" >> "$GITHUB_OUTPUT"
-          else
-            branch="release/$next_tag"
-            existing_pr="$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')"
-            if [[ -n "$existing_pr" ]]; then
-              echo "Release PR #$existing_pr is already open for $next_tag"
-              echo "action=none" >> "$GITHUB_OUTPUT"
-            elif git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null; then
-              echo "::error::Release branch $branch exists without an open PR"
-              exit 1
-            else
-              echo "branch=$branch" >> "$GITHUB_OUTPUT"
-              echo "action=pr" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-
-      - name: Configure SSH commit signing
-        if: >-
-          steps.current-main.outputs.current == 'true' &&
-          steps.plan.outputs.action != 'none'
-        env:
-          SSH_PRIVATE_KEY: ${{ secrets.RELEASE_SSH_PRIVATE_KEY }}
-          SSH_PUBLIC_KEY: ${{ vars.RELEASE_SSH_PUBLIC_KEY }}
-          COMMIT_NAME: ${{ vars.RELEASE_COMMIT_NAME }}
-          COMMIT_EMAIL: ${{ vars.RELEASE_COMMIT_EMAIL }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$SSH_PRIVATE_KEY" || -z "$SSH_PUBLIC_KEY" || -z "$COMMIT_NAME" || -z "$COMMIT_EMAIL" ]]; then
-            echo "::error::Configure the release SSH signing key and author variables"
-            exit 1
-          fi
-          install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/release-signing-key"
-          chmod 600 "$HOME/.ssh/release-signing-key"
-          printf '%s %s\n' "$COMMIT_EMAIL" "$SSH_PUBLIC_KEY" > "$HOME/.ssh/allowed_signers"
-          git config --global gpg.format ssh
-          git config --global gpg.ssh.allowedSignersFile "$HOME/.ssh/allowed_signers"
-          git config --global user.signingkey "$HOME/.ssh/release-signing-key"
-          git config --global commit.gpgsign true
-          git config --global tag.gpgsign true
-          git config --global user.name "$COMMIT_NAME"
-          git config --global user.email "$COMMIT_EMAIL"
-
-      - name: Create signed release PR
-        if: >-
-          steps.current-main.outputs.current == 'true' &&
-          steps.plan.outputs.action == 'pr'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GIT_COMMIT_AUTHOR: "${{ vars.RELEASE_COMMIT_NAME }} <${{ vars.RELEASE_COMMIT_EMAIL }}>"
-          RELEASE_BRANCH: ${{ steps.plan.outputs.branch }}
-          RELEASE_TAG: ${{ steps.plan.outputs.tag }}
-        run: |
-          uv run --with python-semantic-release==10.7.0 --no-project semantic-release version --no-tag --no-push --no-vcs-release
-          git verify-commit HEAD
-          git switch -c "$RELEASE_BRANCH"
-          git push --set-upstream origin "$RELEASE_BRANCH"
-          gh pr create \
-            --base main \
-            --head "$RELEASE_BRANCH" \
-            --title "chore(release): $RELEASE_TAG" \
-            --body "This signed release PR updates the package version, lockfile, and changelog. Merge it after the required checks pass to create and publish $RELEASE_TAG."
-
-      - name: Create tag and GitHub release
-        if: >-
-          steps.current-main.outputs.current == 'true' &&
-          steps.plan.outputs.action == 'tag'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GIT_COMMIT_AUTHOR: "${{ vars.RELEASE_COMMIT_NAME }} <${{ vars.RELEASE_COMMIT_EMAIL }}>"
-        run: uv run --with python-semantic-release==10.7.0 --no-project semantic-release version --no-commit
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: uv run --with python-semantic-release==10.7.0 --no-project semantic-release version
