@@ -110,11 +110,19 @@ included in the public repository.
 
 ## Releases
 
-Merges to `main` are evaluated by Python Semantic Release. Use Conventional
-Commit messages so releases can infer the version bump: `feat:` for a minor
-release, `fix:` or `perf:` for a patch, and `!` for a breaking change.
+After CI succeeds on `main`, Python Semantic Release opens a signed version PR
+for Conventional Commits (`feat:` for minor, `fix:` or `perf:` for patch, and
+`!` for breaking changes). Merge that PR after its checks pass; the workflow
+then creates the version tag and GitHub release without pushing to `main`.
 
-PyPI publishing uses OIDC Trusted Publishing. Configure the PyPI publisher for
-this repository's `publish.yml` workflow and the `pypi` GitHub environment
-before the first release. Ensure the workflow token is permitted to push
-version commits and tags to `main`.
+Automated release PRs require a GitHub App installed with repository Contents
+and Pull requests write permissions. Set `RELEASE_APP_CLIENT_ID` as a repository
+variable and `RELEASE_APP_PRIVATE_KEY` as a repository secret. Also add an SSH
+signing key to the GitHub account used to author release commits, then configure
+`RELEASE_SSH_PRIVATE_KEY` as a secret and `RELEASE_SSH_PUBLIC_KEY`,
+`RELEASE_COMMIT_NAME`, and the account's verified `RELEASE_COMMIT_EMAIL` as
+repository variables. The private key must never be committed or shared.
+
+PyPI publishing uses OIDC Trusted Publishing, so no PyPI API token is needed.
+Configure the PyPI publisher for this repository's `publish.yml` workflow before
+the first upload.
