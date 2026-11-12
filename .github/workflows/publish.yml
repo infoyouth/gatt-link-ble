@@ -10,6 +10,12 @@ on:
         description: Release tag to build and publish
         required: false
         type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
