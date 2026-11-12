@@ -44,17 +44,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          before="$(git rev-parse HEAD)"
+          before_tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
           uv run --with python-semantic-release==10.7.0 --no-project semantic-release version
-          after="$(git rev-parse HEAD)"
-          if [[ "$before" == "$after" ]]; then
+          tag="$(git tag --list 'v*' --sort=-version:refname | head -n 1)"
+          if [[ -z "$tag" || "$tag" == "$before_tag" ]]; then
             echo "released=false" >> "$GITHUB_OUTPUT"
           else
-            tag="$(git tag --points-at "$after" | grep '^v' | head -n 1)"
-            if [[ -z "$tag" ]]; then
-              echo "::error::Semantic Release created a commit without a version tag"
-              exit 1
-            fi
             echo "released=true" >> "$GITHUB_OUTPUT"
             echo "tag=$tag" >> "$GITHUB_OUTPUT"
           fi
