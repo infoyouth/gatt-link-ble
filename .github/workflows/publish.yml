@@ -4,12 +4,6 @@ on:
   push:
     tags:
       - "v*"
-  workflow_call:
-    inputs:
-      tag:
-        description: Release tag to build and publish
-        required: false
-        type: string
   workflow_dispatch:
     inputs:
       tag:
