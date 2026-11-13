@@ -37,6 +37,9 @@ jobs:
         with:
           enable-cache: true
 
+      - name: Update lockfile for the release version
+        run: uv lock
+
       - name: Install locked dependencies
         run: uv sync --locked --all-groups
 

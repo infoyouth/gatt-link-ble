@@ -55,10 +55,11 @@ addopts = [
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
+assets = ["uv.lock"]
 commit_parser = "conventional"
 tag_format = "v{version}"
 commit_message = "chore(release): {version}"
-build_command = "uv lock --no-upgrade && uv build"
+build_command = "uv lock && uv build"
 allow_zero_version = true
 
 [tool.semantic_release.commit_parser_options]
