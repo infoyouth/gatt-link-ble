@@ -13,6 +13,7 @@ from gatt_link_ble import ConnectionMode, GattLinkClient
 from gatt_link_ble.const import (
     BATTERY_LEVEL_CHAR_UUID,
     FIRMWARE_REVISION_CHAR_UUID,
+    HEART_RATE_MEASUREMENT_CHAR_UUID,
     MANUFACTURER_NAME_CHAR_UUID,
     MODEL_NUMBER_CHAR_UUID,
     PRESSURE_CHAR_UUID,
@@ -87,11 +88,34 @@ async def test_poll_reads_metadata_and_sensors_then_disconnects(
     assert connection_args is not None
     assert connection_args.kwargs["max_attempts"] == 3
     assert connection_args.kwargs["ble_device_callback"] is provider
-    assert sum(
-        call.args[0].uuid == MANUFACTURER_NAME_CHAR_UUID
-        for call in client.read_gatt_char.await_args_list
-    ) == 1
+    assert (
+        sum(
+            call.args[0].uuid == MANUFACTURER_NAME_CHAR_UUID
+            for call in client.read_gatt_char.await_args_list
+        )
+        == 1
+    )
     assert client.disconnect.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_poll_updates_heart_rate_sensor(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({HEART_RATE_MEASUREMENT_CHAR_UUID: ["read"]})
+    client = client_factory(services)
+    client.read_gatt_char.return_value = bytearray(struct.pack("<BB", 0, 72))
+    establish = AsyncMock(return_value=client)
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    gatt_client = GattLinkClient(ble_device, ConnectionMode.POLL_AND_DISCONNECT)
+
+    state = await gatt_client.poll()
+
+    assert state.sensors.heart_rate == 72
+    assert HEART_RATE_MEASUREMENT_CHAR_UUID in state.supported_features
 
 
 @pytest.mark.asyncio
@@ -101,9 +125,7 @@ async def test_poll_disconnects_even_when_payload_parsing_fails(
     service_collection_factory: ServiceCollectionFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    services = service_collection_factory(
-        {TEMPERATURE_CHAR_UUID: ["read"]}
-    )
+    services = service_collection_factory({TEMPERATURE_CHAR_UUID: ["read"]})
     client = client_factory(services)
     establish = AsyncMock(return_value=client)
     monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
@@ -122,9 +144,7 @@ async def test_push_starts_notifications_and_updates_state(
     service_collection_factory: ServiceCollectionFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    services = service_collection_factory(
-        {BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]}
-    )
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
     client = client_factory(services)
     client.read_gatt_char.return_value = bytearray(b"\x32")
     establish = AsyncMock(return_value=client)
@@ -158,9 +178,7 @@ async def test_malformed_notification_is_logged_without_changing_state(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    services = service_collection_factory(
-        {BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]}
-    )
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
     client = client_factory(services)
     client.read_gatt_char.return_value = bytearray(b"\x32")
     establish = AsyncMock(return_value=client)
@@ -187,9 +205,7 @@ async def test_disconnect_notifies_and_reconnects_with_backoff(
     service_collection_factory: ServiceCollectionFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    services = service_collection_factory(
-        {TEMPERATURE_CHAR_UUID: ["read", "notify"]}
-    )
+    services = service_collection_factory({TEMPERATURE_CHAR_UUID: ["read", "notify"]})
     first_client = client_factory(services)
     second_client = client_factory(services)
     first_client.read_gatt_char.return_value = bytearray(struct.pack("<h", 2000))
@@ -246,9 +262,7 @@ async def test_start_is_idempotent_and_stop_cancels_pending_reconnect(
     service_collection_factory: ServiceCollectionFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    services = service_collection_factory(
-        {BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]}
-    )
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
     client = client_factory(services)
     client.read_gatt_char.return_value = bytearray(b"\x32")
     establish = AsyncMock(return_value=client)
@@ -287,9 +301,7 @@ async def test_start_cleans_up_connection_when_setup_fails(
     service_collection_factory: ServiceCollectionFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    services = service_collection_factory(
-        {BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]}
-    )
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
     client = client_factory(services)
     client.start_notify.side_effect = BleakError("notify failed")
     establish = AsyncMock(return_value=client)
@@ -320,9 +332,7 @@ async def test_push_subscribes_to_indications_and_skips_unreadable_characteristi
 
     client.start_notify.assert_awaited_once()
     client.read_gatt_char.assert_not_awaited()
-    assert gatt_client.state.supported_features == frozenset(
-        {TEMPERATURE_CHAR_UUID}
-    )
+    assert gatt_client.state.supported_features == frozenset({TEMPERATURE_CHAR_UUID})
     await gatt_client.stop()
 
 
@@ -375,9 +385,7 @@ async def test_reconnect_backoff_caps_at_sixty_seconds(
     service_collection_factory: ServiceCollectionFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    services = service_collection_factory(
-        {TEMPERATURE_CHAR_UUID: ["read", "notify"]}
-    )
+    services = service_collection_factory({TEMPERATURE_CHAR_UUID: ["read", "notify"]})
     client = client_factory(services)
     client.read_gatt_char.return_value = bytearray(struct.pack("<h", 2000))
     establish = AsyncMock(
