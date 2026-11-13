@@ -80,7 +80,7 @@ characteristics once and disconnects before returning.
 | Heart Rate Service | `0x180D` | Heart Rate Measurement `0x2A37` |
 | Device Information | `0x180A` | Manufacturer `0x2A29`, Model `0x2A24`, Firmware `0x2A26`, Hardware `0x2A27` |
 | Environmental Sensing | `0x181A` | Temperature `0x2A6E`, Humidity `0x2A6F`, Pressure `0x2A6D` |
-| Nordic Thingy Environment | `ef680200-9b35-4933-9b10-52ffa9740042` | Temperature, pressure, humidity, eCO2, TVOC |
+| Nordic Thingy Environment | `ef680200-9b35-4933-9b10-52ffa9740042` | Temperature, pressure, humidity, eCO2, TVOC, color/illuminance |
 
 Parsed values are available through the immutable `GattDeviceState`,
 `DeviceMetadata`, and `GattSensorData` models.

@@ -3,6 +3,7 @@
 from typing import ClassVar
 
 from ..const import (
+    THINGY_COLOR_CHAR_UUID,
     THINGY_ENVIRONMENT_SERVICE_UUID,
     THINGY_GAS_CHAR_UUID,
     THINGY_HUMIDITY_CHAR_UUID,
@@ -24,6 +25,7 @@ class ThingyEnvironmentParser:
         THINGY_PRESSURE_CHAR_UUID,
         THINGY_HUMIDITY_CHAR_UUID,
         THINGY_GAS_CHAR_UUID,
+        THINGY_COLOR_CHAR_UUID,
     )
 
     def parse_characteristic(
@@ -44,6 +46,9 @@ class ThingyEnvironmentParser:
         if normalized_uuid == THINGY_GAS_CHAR_UUID:
             eco2, tvoc = unpack_struct("<HH", data, char_uuid)
             return {"eco2": eco2, "tvoc": tvoc}
+        if normalized_uuid == THINGY_COLOR_CHAR_UUID:
+            _red, _green, _blue, clear = unpack_struct("<HHHH", data, char_uuid)
+            return {"illuminance": clear}
         raise GattParseError(
             f"Unsupported Thingy environment characteristic: {char_uuid}"
         )
