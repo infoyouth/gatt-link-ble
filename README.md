@@ -95,6 +95,9 @@ uv run python scripts/live_scan.py
 uv run python scripts/live_scan.py AA:BB:CC:DD:EE:FF --timeout 10
 ```
 
+The output may include MAC addresses or other personal identifiers; redact
+them before sharing it publicly.
+
 ## Development
 
 ```shell
@@ -108,15 +111,3 @@ uv build
 Tests use mocked BLE clients and GATT services; no hardware is needed.
 `ARCHITECTURE.md` is a local implementation guide and is intentionally not
 included in the public repository.
-
-## Releases
-
-After CI succeeds on `main`, Python Semantic Release uses Conventional Commits
-(`feat:` for minor, `fix:` or `perf:` for patch, and `!` for breaking changes)
-to update the version, create a GitHub release, and push a tag. Configure the
-repository Actions secret `RELEASE_PAT` with a GitHub token that can write to
-this repository and whose account is allowed to bypass the `main` branch rules.
-
-The PAT is only for GitHub release operations; it is not a PyPI token. PyPI
-publishing uses OIDC Trusted Publishing. Configure the PyPI publisher for this
-repository's `publish.yml` workflow before the first upload.
