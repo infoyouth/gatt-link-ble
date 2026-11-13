@@ -3,6 +3,7 @@ import struct
 import pytest
 
 from gatt_link_ble.const import (
+    THINGY_COLOR_CHAR_UUID,
     THINGY_GAS_CHAR_UUID,
     THINGY_HUMIDITY_CHAR_UUID,
     THINGY_PRESSURE_CHAR_UUID,
@@ -45,6 +46,15 @@ def test_thingy_gas_values_are_unsigned() -> None:
     assert parsed == {"eco2": 0xFFA0, "tvoc": 0x80FF}
 
 
+def test_thingy_color_maps_clear_channel_to_illuminance() -> None:
+    parsed = ThingyEnvironmentParser().parse_characteristic(
+        THINGY_COLOR_CHAR_UUID,
+        bytearray(struct.pack("<HHHH", 0xFFA0, 0x80FF, 0x1234, 0xBEEF)),
+    )
+
+    assert parsed == {"illuminance": 0xBEEF}
+
+
 @pytest.mark.parametrize(
     "char_uuid",
     [
@@ -52,6 +62,7 @@ def test_thingy_gas_values_are_unsigned() -> None:
         THINGY_PRESSURE_CHAR_UUID,
         THINGY_HUMIDITY_CHAR_UUID,
         THINGY_GAS_CHAR_UUID,
+        THINGY_COLOR_CHAR_UUID,
     ],
 )
 def test_thingy_rejects_truncated_payload(char_uuid: str) -> None:
@@ -62,6 +73,6 @@ def test_thingy_rejects_truncated_payload(char_uuid: str) -> None:
 def test_thingy_rejects_unknown_characteristic() -> None:
     with pytest.raises(GattParseError, match="Unsupported Thingy"):
         ThingyEnvironmentParser().parse_characteristic(
-            "ef680205-9b35-4933-9b10-52ffa9740042",
+            "ef680206-9b35-4933-9b10-52ffa9740042",
             bytearray(),
         )

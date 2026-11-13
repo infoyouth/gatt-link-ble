@@ -18,6 +18,7 @@ from gatt_link_ble.const import (
     MODEL_NUMBER_CHAR_UUID,
     PRESSURE_CHAR_UUID,
     TEMPERATURE_CHAR_UUID,
+    THINGY_COLOR_CHAR_UUID,
     THINGY_GAS_CHAR_UUID,
     THINGY_HUMIDITY_CHAR_UUID,
     THINGY_PRESSURE_CHAR_UUID,
@@ -349,6 +350,7 @@ async def test_thingy_poll_updates_each_sensor_field(
             THINGY_PRESSURE_CHAR_UUID: ["read"],
             THINGY_HUMIDITY_CHAR_UUID: ["read"],
             THINGY_GAS_CHAR_UUID: ["read"],
+            THINGY_COLOR_CHAR_UUID: ["read"],
         }
     )
     client = client_factory(services)
@@ -357,6 +359,7 @@ async def test_thingy_poll_updates_each_sensor_field(
         THINGY_PRESSURE_CHAR_UUID: bytearray(struct.pack("<iB", 1013, 25)),
         THINGY_HUMIDITY_CHAR_UUID: bytearray(b"\x46"),
         THINGY_GAS_CHAR_UUID: bytearray(struct.pack("<HH", 500, 60)),
+        THINGY_COLOR_CHAR_UUID: bytearray(struct.pack("<HHHH", 1, 2, 3, 400)),
     }
 
     async def read_characteristic(
@@ -376,6 +379,7 @@ async def test_thingy_poll_updates_each_sensor_field(
     assert state.sensors.humidity == 70.0
     assert state.sensors.eco2 == 500
     assert state.sensors.tvoc == 60
+    assert state.sensors.illuminance == 400
 
 
 @pytest.mark.asyncio
