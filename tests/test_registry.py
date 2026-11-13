@@ -2,11 +2,16 @@ from typing import ClassVar
 
 import pytest
 
-from gatt_link_ble.const import BATTERY_SERVICE_UUID, ENVIRONMENTAL_SENSING_SERVICE_UUID
+from gatt_link_ble.const import (
+    BATTERY_SERVICE_UUID,
+    ENVIRONMENTAL_SENSING_SERVICE_UUID,
+    HEART_RATE_SERVICE_UUID,
+)
 from gatt_link_ble.parsers import (
     BatteryParser,
     DeviceInfoParser,
     EnvironmentalParser,
+    HeartRateParser,
     ThingyEnvironmentParser,
 )
 from gatt_link_ble.registry import (
@@ -19,15 +24,19 @@ from gatt_link_ble.registry import (
 def test_built_in_parsers_register_by_service() -> None:
     assert GATT_PARSER_REGISTRY[BATTERY_SERVICE_UUID] is BatteryParser
     assert (
-        GATT_PARSER_REGISTRY[ENVIRONMENTAL_SENSING_SERVICE_UUID]
-        is EnvironmentalParser
+        GATT_PARSER_REGISTRY[ENVIRONMENTAL_SENSING_SERVICE_UUID] is EnvironmentalParser
     )
+    assert GATT_PARSER_REGISTRY[HEART_RATE_SERVICE_UUID] is HeartRateParser
 
 
 def test_registry_matches_normalized_services_and_ignores_unknown() -> None:
-    parsers = get_parsers_for_services(["180f", "181a", "ffff"])
+    parsers = get_parsers_for_services(["180d", "180f", "181a", "ffff"])
 
-    assert {type(parser) for parser in parsers} == {BatteryParser, EnvironmentalParser}
+    assert {type(parser) for parser in parsers} == {
+        BatteryParser,
+        EnvironmentalParser,
+        HeartRateParser,
+    }
 
 
 def test_registry_instantiates_device_information_and_thingy_parsers() -> None:

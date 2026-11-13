@@ -32,6 +32,7 @@ class GattSensorData:
     tvoc: int | None = None
     battery: int | None = None
     illuminance: int | None = None
+    heart_rate: int | None = None
 
 
 @dataclass(frozen=True)

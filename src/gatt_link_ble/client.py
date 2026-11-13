@@ -41,6 +41,7 @@ class _SensorUpdates(TypedDict, total=False):
     tvoc: int | None
     battery: int | None
     illuminance: int | None
+    heart_rate: int | None
 
 
 class GattLinkClient:
@@ -292,13 +293,9 @@ class GattLinkClient:
                     isinstance(value, float) or value is None
                 ):
                     updates["pressure"] = value
-                elif field_name == "eco2" and (
-                    isinstance(value, int) or value is None
-                ):
+                elif field_name == "eco2" and (isinstance(value, int) or value is None):
                     updates["eco2"] = value
-                elif field_name == "tvoc" and (
-                    isinstance(value, int) or value is None
-                ):
+                elif field_name == "tvoc" and (isinstance(value, int) or value is None):
                     updates["tvoc"] = value
                 elif field_name == "battery" and (
                     isinstance(value, int) or value is None
@@ -308,6 +305,10 @@ class GattLinkClient:
                     isinstance(value, int) or value is None
                 ):
                     updates["illuminance"] = value
+                elif field_name == "heart_rate" and (
+                    isinstance(value, int) or value is None
+                ):
+                    updates["heart_rate"] = value
                 else:
                     raise GattParseError(
                         f"Parser returned invalid value for sensor field {field_name}"
