@@ -171,6 +171,37 @@ async def test_push_starts_notifications_and_updates_state(
 
 
 @pytest.mark.asyncio
+async def test_state_callback_error_is_logged_without_interrupting_updates(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
+    client = client_factory(services)
+    client.read_gatt_char.return_value = bytearray(b"\x32")
+    establish = AsyncMock(return_value=client)
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    state_callback = Mock(side_effect=RuntimeError("callback failed"))
+    gatt_client = GattLinkClient(
+        ble_device,
+        state_callback=state_callback,
+    )
+
+    await gatt_client.start()
+
+    characteristic = services.get_characteristic(BATTERY_LEVEL_CHAR_UUID)
+    assert characteristic is not None
+    notify_callback = client.start_notify.await_args.args[1]
+    await notify_callback(characteristic, bytearray(b"\x5a"))
+
+    assert gatt_client.state.sensors.battery == 90
+    assert "State callback raised an exception" in caplog.text
+    await gatt_client.stop()
+
+
+@pytest.mark.asyncio
 async def test_malformed_notification_is_logged_without_changing_state(
     ble_device: BLEDevice,
     client_factory: ClientFactory,
@@ -204,6 +235,7 @@ async def test_disconnect_notifies_and_reconnects_with_backoff(
     client_factory: ClientFactory,
     service_collection_factory: ServiceCollectionFactory,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     services = service_collection_factory({TEMPERATURE_CHAR_UUID: ["read", "notify"]})
     first_client = client_factory(services)
@@ -220,7 +252,7 @@ async def test_disconnect_notifies_and_reconnects_with_backoff(
     monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
     sleep = AsyncMock()
     monkeypatch.setattr("gatt_link_ble.client.asyncio.sleep", sleep)
-    disconnect_callback = Mock()
+    disconnect_callback = Mock(side_effect=RuntimeError("callback failed"))
     replacement_device = BLEDevice("11:22:33:44:55:66", "Proxy Device", {})
     provider = Mock(side_effect=[ble_device, replacement_device, replacement_device])
     gatt_client = GattLinkClient(
@@ -236,6 +268,7 @@ async def test_disconnect_notifies_and_reconnects_with_backoff(
     await reconnect_task
 
     assert disconnect_callback.call_count == 1
+    assert "Disconnect callback raised an exception" in caplog.text
     assert [call.args[0] for call in sleep.await_args_list] == [2, 4]
     assert establish.await_count == 3
     assert gatt_client.state.sensors.temperature == 21.0

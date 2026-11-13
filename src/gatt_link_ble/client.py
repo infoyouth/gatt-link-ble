@@ -349,7 +349,10 @@ class GattLinkClient:
     def _set_state(self, state: GattDeviceState) -> None:
         self._state = state
         if self._state_callback is not None:
-            self._state_callback(state)
+            try:
+                self._state_callback(state)
+            except Exception:
+                _LOGGER.exception("State callback raised an exception")
 
     def _on_disconnect(self, client: BleakClientWithServiceCache) -> None:
         if not self._running or client is not self._client:
@@ -360,7 +363,10 @@ class GattLinkClient:
 
     async def _reconnect(self) -> None:
         if self._disconnect_callback is not None:
-            self._disconnect_callback()
+            try:
+                self._disconnect_callback()
+            except Exception:
+                _LOGGER.exception("Disconnect callback raised an exception")
 
         delay = 2
         while self._running:
