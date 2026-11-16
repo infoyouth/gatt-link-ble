@@ -4,7 +4,9 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import fields, replace
-from typing import TypedDict
+from datetime import UTC, datetime
+from math import isfinite
+from typing import Any, TypedDict
 
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
@@ -15,7 +17,7 @@ from bleak_retry_connector import (
 )
 
 from .const import DEVICE_INFORMATION_SERVICE_UUID
-from .exceptions import GattConnectionError, GattParseError
+from .exceptions import GattConnectionError, GattParseError, GattTimeoutError
 from .models import (
     ConnectionMode,
     DeviceMetadata,
@@ -24,11 +26,15 @@ from .models import (
 )
 from .parsers import DeviceInfoParser
 from .parsers.base import BaseGattParser, normalize_uuid
-from .registry import get_parsers_for_services
+from .registry import (
+    get_characteristics_for_capabilities,
+    get_parsers_for_services,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 type BleDeviceSource = BLEDevice | Callable[[], BLEDevice]
+type BleDeviceProvider = Callable[[], BLEDevice | None]
 type StateCallback = Callable[[GattDeviceState], None]
 type DisconnectCallback = Callable[[], None]
 
@@ -55,19 +61,43 @@ class GattLinkClient:
         name: str | None = None,
         state_callback: StateCallback | None = None,
         disconnect_callback: DisconnectCallback | None = None,
+        enabled_capabilities: set[str] | None = None,
+        ble_device_provider: BleDeviceProvider | None = None,
+        connect_timeout: float = 10.0,
     ) -> None:
         self._name_was_provided = name is not None
         if isinstance(ble_device, BLEDevice):
-            self._ble_device = ble_device
-            self._ble_device_callback: Callable[[], BLEDevice] | None = None
+            initial_ble_device = ble_device
+            legacy_ble_device_provider: BleDeviceProvider | None = None
         else:
-            self._ble_device_callback = ble_device
-            self._ble_device = ble_device()
+            initial_ble_device = ble_device()
+            legacy_ble_device_provider = ble_device
 
+        if not isfinite(connect_timeout) or connect_timeout <= 0:
+            raise ValueError("connect_timeout must be finite and greater than zero")
+
+        self._initial_ble_device = initial_ble_device
+        self._ble_device = initial_ble_device
+        self._ble_device_provider = (
+            ble_device_provider
+            if ble_device_provider is not None
+            else legacy_ble_device_provider
+        )
         self.mode = mode
-        self.name = name or self._ble_device.name or self._ble_device.address
+        self.name = name or initial_ble_device.name or initial_ble_device.address
+        self._connect_timeout = max(connect_timeout, 10.0)
         self._state_callback = state_callback
         self._disconnect_callback = disconnect_callback
+        valid_capabilities = {field.name for field in fields(GattSensorData)}
+        if enabled_capabilities is not None:
+            unknown_capabilities = enabled_capabilities - valid_capabilities
+            if unknown_capabilities:
+                raise ValueError(
+                    f"Unsupported enabled capabilities: {sorted(unknown_capabilities)}"
+                )
+        self._enabled_capabilities = (
+            None if enabled_capabilities is None else frozenset(enabled_capabilities)
+        )
         self._state = GattDeviceState(
             address=self._ble_device.address,
             name=self._ble_device.name,
@@ -78,11 +108,29 @@ class GattLinkClient:
         self._metadata_loaded = False
         self._running = False
         self._reconnect_task: asyncio.Task[None] | None = None
+        self._attempted_characteristics: set[str] = set()
+        self._successful_characteristics: set[str] = set()
+        self._failed_characteristics: set[str] = set()
+        self._connect_attempts = 0
+        self._last_error: str | None = None
+        self._active_services: tuple[str, ...] = ()
 
     @property
     def state(self) -> GattDeviceState:
         """Return the latest immutable device state."""
         return self._state
+
+    def get_diagnostics(self) -> dict[str, Any]:
+        """Return a JSON-serializable snapshot of connection diagnostics."""
+        return {
+            "mode": self.mode.value,
+            "connected": bool(self._client is not None and self._client.is_connected),
+            "connect_attempts": self._connect_attempts,
+            "last_error": self._last_error,
+            "active_services": list(self._active_services),
+            "failed_characteristics": sorted(self._failed_characteristics),
+            "last_updated": self._state.last_updated.isoformat(),
+        }
 
     async def start(self) -> None:
         """Connect and start notifications in PUSH mode."""
@@ -100,6 +148,7 @@ class GattLinkClient:
             await self._initialize(client)
             await self._start_notifications(client)
             await self._read_sensor_values(client, ignore_parse_errors=True)
+            self._raise_if_all_characteristics_failed()
             succeeded = True
         finally:
             if not succeeded:
@@ -131,11 +180,15 @@ class GattLinkClient:
             raise ValueError("poll() is only available in POLL_AND_DISCONNECT mode")
 
         client = await self._establish_connection()
+        self._client = client
         try:
             await self._initialize(client)
             await self._read_sensor_values(client, ignore_parse_errors=False)
+            self._raise_if_all_characteristics_failed()
             return self._state
         finally:
+            if self._client is client:
+                self._client = None
             await client.disconnect()
 
     async def _establish_connection(
@@ -144,28 +197,51 @@ class GattLinkClient:
             Callable[[BleakClientWithServiceCache], None] | None
         ) = None,
     ) -> BleakClientWithServiceCache:
+        device = self._resolve_ble_device()
+        self._connect_attempts += 1
         try:
-            return await establish_connection(
+            client = await establish_connection(
                 BleakClientWithServiceCache,
-                self._ble_device,
+                device,
                 self.name,
                 disconnected_callback=disconnected_callback,
                 max_attempts=3,
-                ble_device_callback=self._ble_device_callback,
+                timeout=self._connect_timeout,
             )
-        except BleakError as err:
-            raise GattConnectionError(
-                f"Unable to connect to {self._ble_device.address}: {err}"
+        except TimeoutError as err:
+            self._last_error = str(err)
+            raise GattTimeoutError(
+                f"Timed out connecting to {device.address}: {err}"
             ) from err
+        except BleakError as err:
+            self._last_error = str(err)
+            raise GattConnectionError(
+                f"Unable to connect to {device.address}: {err}"
+            ) from err
+        self._last_error = None
+        return client
 
     async def _initialize(self, client: BleakClientWithServiceCache) -> None:
+        self._attempted_characteristics.clear()
+        self._successful_characteristics.clear()
+        self._failed_characteristics.clear()
+        self._active_services = tuple(
+            sorted(
+                normalize_uuid(service.uuid)
+                for service in client.services.services.values()
+            )
+        )
         self._parsers = get_parsers_for_services(
             service.uuid for service in client.services.services.values()
         )
         self._parser_by_characteristic = {
             normalize_uuid(char_uuid): parser
             for parser in self._parsers
-            for char_uuid in parser.characteristic_uuids
+            if not isinstance(parser, DeviceInfoParser)
+            for char_uuid in get_characteristics_for_capabilities(
+                parser,
+                self._enabled_capabilities,
+            )
         }
         supported_features = frozenset(
             normalize_uuid(char_uuid)
@@ -200,10 +276,13 @@ class GattLinkClient:
             characteristic = client.services.get_characteristic(char_uuid)
             if characteristic is None or "read" not in characteristic.properties:
                 continue
-            parsed = parser.parse_characteristic(
-                char_uuid,
-                await client.read_gatt_char(characteristic),
-            )
+            try:
+                data = await client.read_gatt_char(characteristic)
+            except BleakError as err:
+                self._record_characteristic_failure(char_uuid, "read", err)
+                continue
+            self._record_characteristic_success(char_uuid)
+            parsed = parser.parse_characteristic(char_uuid, data)
             for field_name, value in parsed.items():
                 if not isinstance(value, str):
                     raise GattParseError(
@@ -234,13 +313,28 @@ class GattLinkClient:
         for parser in self._parsers:
             if isinstance(parser, DeviceInfoParser):
                 continue
-            for char_uuid in parser.characteristic_uuids:
+            for char_uuid in get_characteristics_for_capabilities(
+                parser,
+                self._enabled_capabilities,
+            ):
                 characteristic = client.services.get_characteristic(char_uuid)
                 if characteristic is None:
                     continue
                 properties = characteristic.properties
                 if "notify" in properties or "indicate" in properties:
-                    await client.start_notify(characteristic, self._on_notification)
+                    try:
+                        await client.start_notify(
+                            characteristic,
+                            self._on_notification,
+                        )
+                    except BleakError as err:
+                        self._record_characteristic_failure(
+                            char_uuid,
+                            "notify",
+                            err,
+                        )
+                        continue
+                    self._record_characteristic_success(char_uuid)
 
     async def _read_sensor_values(
         self,
@@ -251,17 +345,54 @@ class GattLinkClient:
         for parser in self._parsers:
             if isinstance(parser, DeviceInfoParser):
                 continue
-            for char_uuid in parser.characteristic_uuids:
+            for char_uuid in get_characteristics_for_capabilities(
+                parser,
+                self._enabled_capabilities,
+            ):
                 characteristic = client.services.get_characteristic(char_uuid)
                 if characteristic is None or "read" not in characteristic.properties:
                     continue
-                data = await client.read_gatt_char(characteristic)
+                try:
+                    data = await client.read_gatt_char(characteristic)
+                except BleakError as err:
+                    self._record_characteristic_failure(char_uuid, "read", err)
+                    continue
+                self._record_characteristic_success(char_uuid)
                 self._parse_and_update(
                     parser,
                     char_uuid,
                     data,
                     ignore_parse_errors=ignore_parse_errors,
                 )
+
+    def _record_characteristic_success(self, char_uuid: str) -> None:
+        normalized_uuid = normalize_uuid(char_uuid)
+        self._attempted_characteristics.add(normalized_uuid)
+        self._successful_characteristics.add(normalized_uuid)
+
+    def _record_characteristic_failure(
+        self,
+        char_uuid: str,
+        operation: str,
+        error: BleakError,
+    ) -> None:
+        normalized_uuid = normalize_uuid(char_uuid)
+        self._attempted_characteristics.add(normalized_uuid)
+        self._failed_characteristics.add(normalized_uuid)
+        self._last_error = str(error)
+        _LOGGER.warning(
+            "Unable to %s characteristic %s; continuing with remaining "
+            "characteristics: %s",
+            operation,
+            normalized_uuid,
+            error,
+        )
+
+    def _raise_if_all_characteristics_failed(self) -> None:
+        if self._attempted_characteristics and not self._successful_characteristics:
+            raise GattConnectionError(
+                "Unable to read or subscribe to any available GATT characteristics"
+            )
 
     def _parse_and_update(
         self,
@@ -324,7 +455,13 @@ class GattLinkClient:
             )
             return
 
-        self._set_state(replace(self._state, sensors=sensors))
+        self._set_state(
+            replace(
+                self._state,
+                sensors=sensors,
+                last_updated=datetime.now(UTC),
+            )
+        )
 
     async def _on_notification(
         self,
@@ -373,7 +510,6 @@ class GattLinkClient:
             await asyncio.sleep(delay)
             if not self._running:
                 return
-            self._refresh_ble_device()
 
             client: BleakClientWithServiceCache | None = None
             try:
@@ -385,9 +521,12 @@ class GattLinkClient:
                 await self._initialize(client)
                 await self._start_notifications(client)
                 await self._read_sensor_values(client, ignore_parse_errors=True)
+                self._raise_if_all_characteristics_failed()
                 return
             except (BleakError, GattConnectionError, GattParseError):
                 if client is not None:
+                    if self._client is client:
+                        self._client = None
                     await client.disconnect()
                 _LOGGER.warning(
                     "Unable to reconnect to %s; retrying in %s seconds",
@@ -397,17 +536,27 @@ class GattLinkClient:
                 )
                 delay = min(delay * 2, 60)
 
-    def _refresh_ble_device(self) -> None:
-        if self._ble_device_callback is None:
-            return
-
-        self._ble_device = self._ble_device_callback()
+    def _resolve_ble_device(self) -> BLEDevice:
+        provided_device = (
+            self._ble_device_provider()
+            if self._ble_device_provider is not None
+            else None
+        )
+        self._ble_device = (
+            provided_device if provided_device is not None else self._initial_ble_device
+        )
         if not self._name_was_provided:
             self.name = self._ble_device.name or self._ble_device.address
-        self._set_state(
-            replace(
-                self._state,
-                address=self._ble_device.address,
-                name=self._ble_device.name,
+
+        if (
+            self._state.address != self._ble_device.address
+            or self._state.name != self._ble_device.name
+        ):
+            self._set_state(
+                replace(
+                    self._state,
+                    address=self._ble_device.address,
+                    name=self._ble_device.name,
+                )
             )
-        )
+        return self._ble_device
