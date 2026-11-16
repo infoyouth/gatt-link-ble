@@ -85,6 +85,50 @@ characteristics once and disconnects before returning.
 Parsed values are available through the immutable `GattDeviceState`,
 `DeviceMetadata`, and `GattSensorData` models.
 
+## Public API and selective capabilities
+
+The stable public API consists of `GattLinkClient`, `ConnectionMode`,
+`GattDeviceState`, `GattSensorData`, `DeviceMetadata`, `GattLinkError`,
+`GattConnectionError`, `GattTimeoutError`, and `GattParseError`.
+
+By default, the client enables all supported sensor characteristics. Pass
+`enabled_capabilities` to limit sensor reads and notifications to the fields
+your application uses:
+
+```python
+client = GattLinkClient(
+    device,
+    enabled_capabilities={"temperature", "humidity", "battery"},
+)
+```
+
+Supported capability names are `temperature`, `humidity`, `pressure`, `eco2`,
+`tvoc`, `battery`, `illuminance`, and `heart_rate`. `None` enables all
+capabilities; an empty set disables sensor I/O. Device Information is read
+independently when available.
+
+For devices whose `BLEDevice` changes during proxy handoffs, pass a provider.
+Returning `None` falls back to the original device. `connect_timeout` is
+enforced with a minimum of 10 seconds:
+
+```python
+client = GattLinkClient(
+    device,
+    ble_device_provider=get_latest_ble_device,
+    connect_timeout=10.0,
+)
+```
+
+Each connection attempt creates a fresh `BleakClientWithServiceCache`.
+`get_diagnostics()` returns a snapshot containing the connection mode and
+status, number of calls to `establish_connection`, latest error, active
+services, failed characteristic UUIDs, and the state's ISO-8601 `last_updated`
+timestamp:
+
+```python
+print(client.get_diagnostics())
+```
+
 ## Inspect a device
 
 The hardware diagnostic script lists nearby devices and, when passed an

@@ -6,6 +6,11 @@ from gatt_link_ble.const import (
     BATTERY_SERVICE_UUID,
     ENVIRONMENTAL_SENSING_SERVICE_UUID,
     HEART_RATE_SERVICE_UUID,
+    THINGY_COLOR_CHAR_UUID,
+    THINGY_GAS_CHAR_UUID,
+    THINGY_HUMIDITY_CHAR_UUID,
+    THINGY_PRESSURE_CHAR_UUID,
+    THINGY_TEMPERATURE_CHAR_UUID,
 )
 from gatt_link_ble.parsers import (
     BatteryParser,
@@ -16,6 +21,7 @@ from gatt_link_ble.parsers import (
 )
 from gatt_link_ble.registry import (
     GATT_PARSER_REGISTRY,
+    get_characteristics_for_capabilities,
     get_parsers_for_services,
     register_gatt_parser,
 )
@@ -51,6 +57,31 @@ def test_registry_instantiates_device_information_and_thingy_parsers() -> None:
         DeviceInfoParser,
         ThingyEnvironmentParser,
     }
+
+
+def test_characteristic_selection_matches_enabled_capabilities() -> None:
+    parser = ThingyEnvironmentParser()
+
+    assert get_characteristics_for_capabilities(
+        parser,
+        frozenset({"eco2"}),
+    ) == (THINGY_GAS_CHAR_UUID,)
+    assert get_characteristics_for_capabilities(
+        parser,
+        frozenset({"humidity", "pressure", "temperature"}),
+    ) == (
+        THINGY_TEMPERATURE_CHAR_UUID,
+        THINGY_PRESSURE_CHAR_UUID,
+        THINGY_HUMIDITY_CHAR_UUID,
+    )
+    assert get_characteristics_for_capabilities(parser, frozenset()) == ()
+    assert get_characteristics_for_capabilities(parser, None) == (
+        THINGY_TEMPERATURE_CHAR_UUID,
+        THINGY_PRESSURE_CHAR_UUID,
+        THINGY_HUMIDITY_CHAR_UUID,
+        THINGY_GAS_CHAR_UUID,
+        THINGY_COLOR_CHAR_UUID,
+    )
 
 
 def test_duplicate_service_registration_is_rejected() -> None:

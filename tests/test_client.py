@@ -1,6 +1,7 @@
 import asyncio
 import struct
 from collections.abc import Callable
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
@@ -8,12 +9,15 @@ from bleak.assigned_numbers import CharacteristicPropertyName
 from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
+from bleak_retry_connector import BleakClientWithServiceCache
 
 from gatt_link_ble import ConnectionMode, GattLinkClient
 from gatt_link_ble.const import (
     BATTERY_LEVEL_CHAR_UUID,
+    BATTERY_SERVICE_UUID,
     FIRMWARE_REVISION_CHAR_UUID,
     HEART_RATE_MEASUREMENT_CHAR_UUID,
+    HUMIDITY_CHAR_UUID,
     MANUFACTURER_NAME_CHAR_UUID,
     MODEL_NUMBER_CHAR_UUID,
     PRESSURE_CHAR_UUID,
@@ -24,7 +28,11 @@ from gatt_link_ble.const import (
     THINGY_PRESSURE_CHAR_UUID,
     THINGY_TEMPERATURE_CHAR_UUID,
 )
-from gatt_link_ble.exceptions import GattParseError
+from gatt_link_ble.exceptions import (
+    GattConnectionError,
+    GattParseError,
+    GattTimeoutError,
+)
 
 type ServiceCollectionFactory = Callable[
     [dict[str, list[CharacteristicPropertyName]]],
@@ -88,7 +96,8 @@ async def test_poll_reads_metadata_and_sensors_then_disconnects(
     connection_args = establish.await_args
     assert connection_args is not None
     assert connection_args.kwargs["max_attempts"] == 3
-    assert connection_args.kwargs["ble_device_callback"] is provider
+    assert connection_args.args[1] is ble_device
+    assert connection_args.kwargs["timeout"] == 10.0
     assert (
         sum(
             call.args[0].uuid == MANUFACTURER_NAME_CHAR_UUID
@@ -117,6 +126,322 @@ async def test_poll_updates_heart_rate_sensor(
 
     assert state.sensors.heart_rate == 72
     assert HEART_RATE_MEASUREMENT_CHAR_UUID in state.supported_features
+
+
+@pytest.mark.asyncio
+async def test_poll_continues_after_a_characteristic_read_fails(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = service_collection_factory(
+        {
+            BATTERY_LEVEL_CHAR_UUID: ["read"],
+            TEMPERATURE_CHAR_UUID: ["read"],
+        }
+    )
+    client = client_factory(services)
+
+    async def read_characteristic(
+        characteristic: BleakGATTCharacteristic,
+    ) -> bytearray:
+        if characteristic.uuid == BATTERY_LEVEL_CHAR_UUID:
+            raise BleakError("battery read failed")
+        return bytearray(struct.pack("<h", 2050))
+
+    client.read_gatt_char.side_effect = read_characteristic
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(
+        ble_device,
+        ConnectionMode.POLL_AND_DISCONNECT,
+    )
+
+    state = await gatt_client.poll()
+
+    assert state.sensors.temperature == 20.5
+    assert state.sensors.battery is None
+    assert "battery read failed" in caplog.text
+    assert state.last_updated.tzinfo is UTC
+    diagnostics = gatt_client.get_diagnostics()
+    assert diagnostics["failed_characteristics"] == [BATTERY_LEVEL_CHAR_UUID]
+    assert diagnostics["last_error"] == "battery read failed"
+    client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_poll_continues_after_device_metadata_read_fails(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = service_collection_factory(
+        {
+            BATTERY_LEVEL_CHAR_UUID: ["read"],
+            MANUFACTURER_NAME_CHAR_UUID: ["read"],
+            MODEL_NUMBER_CHAR_UUID: ["read"],
+        }
+    )
+    client = client_factory(services)
+
+    async def read_characteristic(
+        characteristic: BleakGATTCharacteristic,
+    ) -> bytearray:
+        if characteristic.uuid == MANUFACTURER_NAME_CHAR_UUID:
+            raise BleakError("manufacturer read failed")
+        if characteristic.uuid == MODEL_NUMBER_CHAR_UUID:
+            return bytearray(b"Thingy")
+        return bytearray(b"\x40")
+
+    client.read_gatt_char.side_effect = read_characteristic
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(
+        ble_device,
+        ConnectionMode.POLL_AND_DISCONNECT,
+    )
+
+    state = await gatt_client.poll()
+
+    assert state.metadata.manufacturer is None
+    assert state.metadata.model == "Thingy"
+    assert state.sensors.battery == 64
+    assert "manufacturer read failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_poll_raises_connection_error_when_all_characteristic_reads_fail(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read"]})
+    client = client_factory(services)
+    client.read_gatt_char.side_effect = BleakError("device unavailable")
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(
+        ble_device,
+        ConnectionMode.POLL_AND_DISCONNECT,
+    )
+
+    with pytest.raises(GattConnectionError, match="any available"):
+        await gatt_client.poll()
+
+    client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_enabled_capabilities_filter_push_reads_and_subscriptions(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory(
+        {
+            BATTERY_LEVEL_CHAR_UUID: ["read", "notify"],
+            HUMIDITY_CHAR_UUID: ["read", "notify"],
+            TEMPERATURE_CHAR_UUID: ["read", "notify"],
+        }
+    )
+    client = client_factory(services)
+    client.read_gatt_char.return_value = bytearray(struct.pack("<h", 2050))
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(
+        ble_device,
+        enabled_capabilities={"temperature"},
+    )
+
+    await gatt_client.start()
+
+    read_uuids = {call.args[0].uuid for call in client.read_gatt_char.await_args_list}
+    notify_uuids = {call.args[0].uuid for call in client.start_notify.await_args_list}
+    assert read_uuids == {TEMPERATURE_CHAR_UUID}
+    assert notify_uuids == {TEMPERATURE_CHAR_UUID}
+    assert gatt_client.state.supported_features == frozenset(
+        {BATTERY_LEVEL_CHAR_UUID, HUMIDITY_CHAR_UUID, TEMPERATURE_CHAR_UUID}
+    )
+    await gatt_client.stop()
+
+
+@pytest.mark.asyncio
+async def test_empty_capability_set_disables_sensor_io(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
+    client = client_factory(services)
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(ble_device, enabled_capabilities=set())
+
+    await gatt_client.start()
+
+    client.read_gatt_char.assert_not_awaited()
+    client.start_notify.assert_not_awaited()
+    await gatt_client.stop()
+
+
+@pytest.mark.asyncio
+async def test_push_continues_after_one_notification_subscription_fails(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = service_collection_factory(
+        {
+            BATTERY_LEVEL_CHAR_UUID: ["notify"],
+            TEMPERATURE_CHAR_UUID: ["notify"],
+        }
+    )
+    client = client_factory(services)
+
+    async def start_notify(
+        characteristic: BleakGATTCharacteristic,
+        _callback: object,
+    ) -> None:
+        if characteristic.uuid == BATTERY_LEVEL_CHAR_UUID:
+            raise BleakError("battery notification failed")
+
+    client.start_notify.side_effect = start_notify
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(ble_device)
+
+    await gatt_client.start()
+
+    assert client.start_notify.await_count == 2
+    assert "battery notification failed" in caplog.text
+    assert gatt_client.get_diagnostics()["failed_characteristics"] == [
+        BATTERY_LEVEL_CHAR_UUID
+    ]
+    await gatt_client.stop()
+
+
+def test_unknown_enabled_capability_is_rejected(ble_device: BLEDevice) -> None:
+    with pytest.raises(ValueError, match="Unsupported enabled capabilities"):
+        GattLinkClient(ble_device, enabled_capabilities={"unknown"})
+
+
+@pytest.mark.parametrize(
+    ("connect_timeout", "expected_timeout"),
+    [(2.0, 10.0), (12.5, 12.5)],
+)
+@pytest.mark.asyncio
+async def test_provider_falls_back_to_initial_device_and_timeout_floor(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    connect_timeout: float,
+    expected_timeout: float,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read"]})
+    client = client_factory(services)
+    client.read_gatt_char.return_value = bytearray(b"\x40")
+    establish = AsyncMock(return_value=client)
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    provider = Mock(return_value=None)
+    gatt_client = GattLinkClient(
+        ble_device,
+        ConnectionMode.POLL_AND_DISCONNECT,
+        ble_device_provider=provider,
+        connect_timeout=connect_timeout,
+    )
+
+    state = await gatt_client.poll()
+
+    connection_args = establish.await_args
+    assert connection_args is not None
+    assert connection_args.args[0] is BleakClientWithServiceCache
+    assert connection_args.args[0] is not None
+    assert connection_args.args[1] is ble_device
+    assert connection_args.kwargs["timeout"] == expected_timeout
+    assert provider.call_count == 1
+    assert state.sensors.battery == 64
+    assert gatt_client.get_diagnostics() == {
+        "mode": "poll_and_disconnect",
+        "connected": False,
+        "connect_attempts": 1,
+        "last_error": None,
+        "active_services": [BATTERY_SERVICE_UUID],
+        "failed_characteristics": [],
+        "last_updated": state.last_updated.isoformat(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_timeout_is_wrapped_and_recorded_in_diagnostics(
+    ble_device: BLEDevice,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(side_effect=TimeoutError("connect timed out")),
+    )
+    gatt_client = GattLinkClient(
+        ble_device,
+        ConnectionMode.POLL_AND_DISCONNECT,
+    )
+
+    with pytest.raises(GattTimeoutError, match="connect timed out"):
+        await gatt_client.poll()
+
+    diagnostics = gatt_client.get_diagnostics()
+    assert diagnostics["connect_attempts"] == 1
+    assert diagnostics["last_error"] == "connect timed out"
+    assert diagnostics["connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_device_provider_selects_latest_device_on_connection(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read"]})
+    client = client_factory(services)
+    client.read_gatt_char.return_value = bytearray(b"\x40")
+    establish = AsyncMock(return_value=client)
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    replacement_device = BLEDevice("11:22:33:44:55:66", "Proxy Device", {})
+    provider = Mock(return_value=replacement_device)
+    gatt_client = GattLinkClient(
+        ble_device,
+        ConnectionMode.POLL_AND_DISCONNECT,
+        ble_device_provider=provider,
+    )
+
+    state = await gatt_client.poll()
+
+    assert establish.await_args is not None
+    assert establish.await_args.args[1] is replacement_device
+    assert state.address == replacement_device.address
+    assert state.name == replacement_device.name
 
 
 @pytest.mark.asyncio
@@ -246,7 +571,7 @@ async def test_disconnect_notifies_and_reconnects_with_backoff(
     establish = AsyncMock(
         side_effect=[
             first_client,
-            BleakError("offline"),
+            BleakError("ESP_GATT_CONN_CONN_CANCEL"),
             second_client,
         ]
     )
@@ -257,12 +582,17 @@ async def test_disconnect_notifies_and_reconnects_with_backoff(
     replacement_device = BLEDevice("11:22:33:44:55:66", "Proxy Device", {})
     provider = Mock(side_effect=[ble_device, replacement_device, replacement_device])
     gatt_client = GattLinkClient(
-        provider,
+        ble_device,
         disconnect_callback=disconnect_callback,
+        ble_device_provider=provider,
     )
     await gatt_client.start()
 
     connection_callback = establish.await_args_list[0].kwargs["disconnected_callback"]
+    assert all(
+        call.args[0] is BleakClientWithServiceCache
+        for call in establish.await_args_list
+    )
     connection_callback(first_client)
     reconnect_task = gatt_client._reconnect_task
     assert reconnect_task is not None
@@ -338,11 +668,12 @@ async def test_start_cleans_up_connection_when_setup_fails(
     services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
     client = client_factory(services)
     client.start_notify.side_effect = BleakError("notify failed")
+    client.read_gatt_char.side_effect = BleakError("read failed")
     establish = AsyncMock(return_value=client)
     monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
     gatt_client = GattLinkClient(ble_device)
 
-    with pytest.raises(BleakError, match="notify failed"):
+    with pytest.raises(GattConnectionError, match="any available"):
         await gatt_client.start()
 
     assert not gatt_client._running
