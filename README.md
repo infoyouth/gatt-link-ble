@@ -8,7 +8,7 @@ UI-framework dependencies.
 
 ## Requirements and installation
 
-- Python 3.12 or newer
+- Python 3.12 or 3.13
 - BLE adapter and a device advertising supported GATT services
 
 Install from PyPI:
