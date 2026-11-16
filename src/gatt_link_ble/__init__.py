@@ -1,7 +1,12 @@
 """Asynchronous BLE GATT discovery and parsing."""
 
 from .client import GattLinkClient
-from .exceptions import GattConnectionError, GattLinkError, GattParseError
+from .exceptions import (
+    GattConnectionError,
+    GattLinkError,
+    GattParseError,
+    GattTimeoutError,
+)
 from .models import (
     ConnectionMode,
     DeviceMetadata,
@@ -18,4 +23,5 @@ __all__ = [
     "GattLinkError",
     "GattParseError",
     "GattSensorData",
+    "GattTimeoutError",
 ]
