@@ -1,6 +1,7 @@
 """Immutable public data models."""
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 
 
@@ -44,3 +45,4 @@ class GattDeviceState:
     metadata: DeviceMetadata = field(default_factory=DeviceMetadata)
     sensors: GattSensorData = field(default_factory=GattSensorData)
     supported_features: frozenset[str] = frozenset()
+    last_updated: datetime = field(default_factory=lambda: datetime.now(UTC))
