@@ -197,8 +197,13 @@ class GattLinkClient:
             Callable[[BleakClientWithServiceCache], None] | None
         ) = None,
     ) -> BleakClientWithServiceCache:
-        device = self._resolve_ble_device()
         self._connect_attempts += 1
+        try:
+            device = self._resolve_ble_device()
+        except Exception as err:
+            self._last_error = str(err)
+            raise GattConnectionError(f"Unable to resolve BLE device: {err}") from err
+
         try:
             client = await establish_connection(
                 BleakClientWithServiceCache,
@@ -515,7 +520,13 @@ class GattLinkClient:
             try:
                 client = await self._establish_connection(self._on_disconnect)
                 if not self._running:
-                    await client.disconnect()
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        _LOGGER.debug(
+                            "Error disconnecting client after reconnect was stopped",
+                            exc_info=True,
+                        )
                     return
                 self._client = client
                 await self._initialize(client)
@@ -527,7 +538,13 @@ class GattLinkClient:
                 if client is not None:
                     if self._client is client:
                         self._client = None
-                    await client.disconnect()
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        _LOGGER.warning(
+                            "Error cleaning up failed reconnect client",
+                            exc_info=True,
+                        )
                 _LOGGER.warning(
                     "Unable to reconnect to %s; retrying in %s seconds",
                     self._ble_device.address,

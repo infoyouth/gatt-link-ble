@@ -785,3 +785,159 @@ async def test_reconnect_backoff_caps_at_sixty_seconds(
     await reconnect_task
 
     assert delays == [2, 4, 8, 16, 32, 60, 60]
+
+
+@pytest.mark.asyncio
+async def test_repeated_start_stop_uses_fresh_clients(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
+    first_client = client_factory(services)
+    second_client = client_factory(services)
+    first_client.read_gatt_char.return_value = bytearray(b"\x32")
+    second_client.read_gatt_char.return_value = bytearray(b"\x5a")
+    establish = AsyncMock(side_effect=[first_client, second_client])
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    gatt_client = GattLinkClient(ble_device)
+
+    await gatt_client.start()
+    assert gatt_client.state.sensors.battery == 50
+    await gatt_client.stop()
+    await gatt_client.start()
+    assert gatt_client.state.sensors.battery == 90
+    await gatt_client.stop()
+
+    assert first_client is not second_client
+    assert establish.await_count == 2
+    first_client.disconnect.assert_awaited_once()
+    second_client.disconnect.assert_awaited_once()
+    assert gatt_client._client is None
+    assert gatt_client._reconnect_task is None
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_initial_connection_resets_client_state(
+    ble_device: BLEDevice,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection_started = asyncio.Event()
+    never_resume = asyncio.Event()
+
+    async def hold_connection(
+        *_args: object,
+        **_kwargs: object,
+    ) -> BleakClientWithServiceCache:
+        connection_started.set()
+        await never_resume.wait()
+        raise AssertionError("Connection unexpectedly resumed")
+
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(side_effect=hold_connection),
+    )
+    gatt_client = GattLinkClient(ble_device)
+    start_task = asyncio.create_task(gatt_client.start())
+    await connection_started.wait()
+    start_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+    assert not gatt_client._running
+    assert gatt_client._client is None
+    assert gatt_client._reconnect_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_pending_reconnect_connection(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
+    first_client = client_factory(services)
+    first_client.read_gatt_char.return_value = bytearray(b"\x32")
+    connection_started = asyncio.Event()
+    never_resume = asyncio.Event()
+    connection_count = 0
+
+    async def connect(
+        *_args: object,
+        **_kwargs: object,
+    ) -> BleakClientWithServiceCache:
+        nonlocal connection_count
+        connection_count += 1
+        if connection_count == 1:
+            return first_client
+        connection_started.set()
+        await never_resume.wait()
+        raise AssertionError("Reconnect unexpectedly resumed")
+
+    establish = AsyncMock(side_effect=connect)
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    monkeypatch.setattr(
+        "gatt_link_ble.client.asyncio.sleep",
+        AsyncMock(return_value=None),
+    )
+    gatt_client = GattLinkClient(ble_device)
+    await gatt_client.start()
+
+    assert establish.await_args_list[0].kwargs["disconnected_callback"] is not None
+    disconnected_callback = establish.await_args_list[0].kwargs["disconnected_callback"]
+    disconnected_callback(first_client)
+    reconnect_task = gatt_client._reconnect_task
+    assert reconnect_task is not None
+    await connection_started.wait()
+    await gatt_client.stop()
+
+    assert reconnect_task.cancelled()
+    assert establish.await_count == 2
+    assert gatt_client._client is None
+    assert gatt_client._reconnect_task is None
+
+
+@pytest.mark.asyncio
+async def test_reconnect_retries_repeated_timeouts_without_stale_client(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({TEMPERATURE_CHAR_UUID: ["read", "notify"]})
+    first_client = client_factory(services)
+    recovered_client = client_factory(services)
+    first_client.read_gatt_char.return_value = bytearray(struct.pack("<h", 2000))
+    recovered_client.read_gatt_char.return_value = bytearray(struct.pack("<h", 2100))
+    establish = AsyncMock(
+        side_effect=[
+            first_client,
+            GattTimeoutError("first reconnect timed out"),
+            GattTimeoutError("second reconnect timed out"),
+            recovered_client,
+        ]
+    )
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    sleep = AsyncMock()
+    monkeypatch.setattr("gatt_link_ble.client.asyncio.sleep", sleep)
+    gatt_client = GattLinkClient(ble_device)
+    await gatt_client.start()
+
+    disconnected_callback = establish.await_args_list[0].kwargs["disconnected_callback"]
+    disconnected_callback(first_client)
+    reconnect_task = gatt_client._reconnect_task
+    assert reconnect_task is not None
+    await reconnect_task
+
+    assert [call.args[0] for call in sleep.await_args_list] == [2, 4, 8]
+    assert establish.await_count == 4
+    assert gatt_client._client is recovered_client
+    assert gatt_client.state.sensors.temperature == 21.0
+    await gatt_client.stop()
+
+    assert recovered_client.disconnect.await_count == 1
+    assert gatt_client._client is None
+    assert gatt_client._reconnect_task is None
