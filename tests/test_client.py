@@ -941,3 +941,175 @@ async def test_reconnect_retries_repeated_timeouts_without_stale_client(
     assert recovered_client.disconnect.await_count == 1
     assert gatt_client._client is None
     assert gatt_client._reconnect_task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_clears_client_when_disconnect_raises(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
+    client = client_factory(services)
+    client.read_gatt_char.return_value = bytearray(b"\x32")
+    client.disconnect.side_effect = RuntimeError("stop disconnect failed")
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(ble_device)
+    await gatt_client.start()
+
+    with pytest.raises(RuntimeError, match="stop disconnect failed"):
+        await gatt_client.stop()
+
+    assert not gatt_client._running
+    assert gatt_client._client is None
+    assert gatt_client._reconnect_task is None
+    client.disconnect.assert_awaited_once()
+    await gatt_client.stop()
+    client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_start_preserves_setup_error_when_disconnect_cleanup_fails(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
+    client = client_factory(services)
+    client.start_notify.side_effect = BleakError("notify failed")
+    client.read_gatt_char.side_effect = BleakError("read failed")
+    client.disconnect.side_effect = RuntimeError("cleanup disconnect failed")
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(ble_device)
+
+    with pytest.raises(GattConnectionError, match="any available"):
+        await gatt_client.start()
+
+    assert not gatt_client._running
+    assert gatt_client._client is None
+    client.disconnect.assert_awaited_once()
+    assert "Error cleaning up client after failed start" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_poll_clears_client_when_disconnect_raises(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read"]})
+    client = client_factory(services)
+    client.read_gatt_char.return_value = bytearray(b"\x32")
+    client.disconnect.side_effect = RuntimeError("poll disconnect failed")
+    monkeypatch.setattr(
+        "gatt_link_ble.client.establish_connection",
+        AsyncMock(return_value=client),
+    )
+    gatt_client = GattLinkClient(ble_device, ConnectionMode.POLL_AND_DISCONNECT)
+
+    with pytest.raises(RuntimeError, match="poll disconnect failed"):
+        await gatt_client.poll()
+
+    assert gatt_client._client is None
+    assert not gatt_client.get_diagnostics()["connected"]
+    client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_finishes_cleanup_when_cancelled_during_reconnect_shutdown(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read", "notify"]})
+    initial_client = client_factory(services)
+    reconnect_client = client_factory(services)
+    initial_client.read_gatt_char.return_value = bytearray(b"\x32")
+    reconnect_client.read_gatt_char.return_value = bytearray(b"\x5a")
+    establish = AsyncMock(side_effect=[initial_client, reconnect_client])
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    monkeypatch.setattr(
+        "gatt_link_ble.client.asyncio.sleep",
+        AsyncMock(return_value=None),
+    )
+    gatt_client = GattLinkClient(ble_device)
+    original_initialize = gatt_client._initialize
+    reconnect_initializing = asyncio.Event()
+    reconnect_cancelled = asyncio.Event()
+
+    async def hold_reconnect_initialization(
+        client: BleakClientWithServiceCache,
+    ) -> None:
+        if client is reconnect_client:
+            reconnect_initializing.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                reconnect_cancelled.set()
+                await asyncio.Future()
+        else:
+            await original_initialize(client)
+
+    monkeypatch.setattr(gatt_client, "_initialize", hold_reconnect_initialization)
+    await gatt_client.start()
+    disconnected_callback = establish.await_args_list[0].kwargs["disconnected_callback"]
+    disconnected_callback(initial_client)
+    reconnect_task = gatt_client._reconnect_task
+    assert reconnect_task is not None
+    await reconnect_initializing.wait()
+
+    stop_task = asyncio.create_task(gatt_client.stop())
+    await reconnect_cancelled.wait()
+    stop_task.cancel()
+
+    await stop_task
+
+    assert reconnect_task.cancelled()
+    assert not stop_task.cancelled()
+    assert not gatt_client._running
+    assert gatt_client._client is None
+    assert gatt_client._reconnect_task is None
+    reconnect_client.disconnect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_clear_connection_error_after_successful_poll(
+    ble_device: BLEDevice,
+    client_factory: ClientFactory,
+    service_collection_factory: ServiceCollectionFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = service_collection_factory({BATTERY_LEVEL_CHAR_UUID: ["read"]})
+    client = client_factory(services)
+    client.read_gatt_char.return_value = bytearray(b"\x32")
+    establish = AsyncMock(side_effect=[BleakError("adapter unavailable"), client])
+    monkeypatch.setattr("gatt_link_ble.client.establish_connection", establish)
+    gatt_client = GattLinkClient(ble_device, ConnectionMode.POLL_AND_DISCONNECT)
+
+    with pytest.raises(GattConnectionError, match="adapter unavailable"):
+        await gatt_client.poll()
+
+    failed_diagnostics = gatt_client.get_diagnostics()
+    assert failed_diagnostics["connect_attempts"] == 1
+    assert failed_diagnostics["last_error"] == "adapter unavailable"
+    assert not failed_diagnostics["connected"]
+
+    state = await gatt_client.poll()
+
+    recovered_diagnostics = gatt_client.get_diagnostics()
+    assert state.sensors.battery == 50
+    assert recovered_diagnostics["connect_attempts"] == 2
+    assert recovered_diagnostics["last_error"] is None
+    assert not recovered_diagnostics["connected"]
+    client.disconnect.assert_awaited_once()
