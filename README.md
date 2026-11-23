@@ -8,7 +8,7 @@ UI-framework dependencies.
 
 ## Requirements and installation
 
-- Python 3.12 or 3.13
+- Python 3.12, 3.13, or 3.14
 - BLE adapter and a device advertising supported GATT services
 
 Install from PyPI:
@@ -74,6 +74,9 @@ characteristics once and disconnects before returning.
 
 ## Supported profiles
 
+The parsers below are implemented in this library. Parser and fixture coverage
+does not imply that a profile has been validated against physical hardware.
+
 | Profile | Service UUID | Characteristics |
 | --- | --- | --- |
 | Battery Service | `0x180F` | Battery Level `0x2A19` |
@@ -84,6 +87,16 @@ characteristics once and disconnects before returning.
 
 Parsed values are available through the immutable `GattDeviceState`,
 `DeviceMetadata`, and `GattSensorData` models.
+
+## Hardware validation
+
+The Nordic Thingy:52 is the only device physically validated so far. Recorded
+live payloads cover its Thingy Environment characteristics and Battery Level.
+The standard Heart Rate and Environmental Sensing parsers, and Device
+Information decoding, have automated test coverage; no separate physical
+validation is claimed for those profiles or for Thingy:53, Thingy:91, or other
+BLE devices. The Thingy:52 capture did not expose readable Device Information
+characteristics.
 
 ## Public API and selective capabilities
 
