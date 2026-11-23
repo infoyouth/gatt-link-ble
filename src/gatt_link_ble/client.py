@@ -155,7 +155,13 @@ class GattLinkClient:
                 self._running = False
                 self._client = None
                 if client is not None:
-                    await client.disconnect()
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        _LOGGER.warning(
+                            "Error cleaning up client after failed start",
+                            exc_info=True,
+                        )
 
     async def stop(self) -> None:
         """Stop notifications and prevent automatic reconnection."""

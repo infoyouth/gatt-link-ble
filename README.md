@@ -1,5 +1,9 @@
 # gatt-link-ble
 
+[![CI](https://github.com/infoyouth/gatt-link-ble/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/infoyouth/gatt-link-ble/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/gatt-link-ble)](https://pypi.org/project/gatt-link-ble/)
+[![License](https://img.shields.io/pypi/l/gatt-link-ble)](https://github.com/infoyouth/gatt-link-ble/blob/main/LICENSE)
+
 An asynchronous, framework-independent Python library for discovering BLE GATT
 services, decoding sensor values, and receiving device-state updates.
 
@@ -134,9 +138,10 @@ client = GattLinkClient(
 
 Each connection attempt creates a fresh `BleakClientWithServiceCache`.
 `get_diagnostics()` returns a snapshot containing the connection mode and
-status, number of calls to `establish_connection`, latest error, active
+status, connection-attempt count, latest error, active
 services, failed characteristic UUIDs, and the state's ISO-8601 `last_updated`
-timestamp:
+timestamp. `connect_attempts` counts connection attempts, including attempts
+that fail while resolving the current BLE device:
 
 ```python
 print(client.get_diagnostics())
